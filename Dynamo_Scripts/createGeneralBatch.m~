@@ -1,0 +1,136 @@
+%{
+
+Matthew Martinez
+Created 12/10/2020
+Script for cropping points picked in IMOD (model type General) from
+multiple tomograms at a time
+
+Read IMOD model text files into workspace variables
+Create a general model type
+Add/update crop points to Dynamo general model from the IMOD model
+Add to catalogue
+Crop the points
+
+**PREREQUISITES**
+1. .txt files corresponding to a .mod file must be alone in a directory. If
+the directories with the .txt files contain other files that aren't being
+imported, an error will probably be thrown
+
+2. In your tableMap.doc file, tomograms must be listed in the SAME ORDER as
+the model files when you use the 'ls' command in the terminal
+
+3. Put all your .txt model files into a .csv/.txt file, and save this .csv/.txt file
+to the common parent directory of all the .txt model files. For example, I used:
+ ls */imod/ModelFile/txtModel/*.txt > imodModels.csv
+
+As of now, this .csv containing all your .txt models should be the only
+.csv in your parent directory
+
+4. In line 135, update with the proper tableMap.doc file for your project
+%}
+
+model_path = input('Enter the pathway to common parent directory of all IMOD model txt files (without final /): ','s'); % 's' doesn't check your input type
+catal_path = char(input('Enter pathway to directory that contains your catalogue (without final /): ','s'));  
+file = dir([model_path,'/*.csv']) %Finds the .csv file containing all your .txt models to be imported
+filename = strcat(file.folder,'/',file.name);
+
+cd(catal_path) %change to the directory of input
+
+fid = fopen(filename,'r'); %Opens the .txt or .csv file containing all your .txt model files
+txtModels = textscan(fid,'%s'); %reads all lines into a cell
+fclose(fid);
+
+numfiles = length(txtModels{1,1}); %number of model .txt files
+
+%Input catalogue name, volume number, source directory name for cropped
+%particles, and crop size
+catal = char(input('Name of catalogue: ','s'));
+volnum = input('Enter volume number corresponding to the FIRST model to be imported (type an integer): ');
+pName = char(input('Name of source directory for cropped particles: ','s'));
+cropSize = input('Particle crop size: ');
+
+allTables = cell(1,numfiles); %Cell to input all tables for merging
+
+%Put all .txt model files with full pathway into a cell
+allFiles = cell(1,numfiles);
+for i = 1:numfiles
+    allFiles{1,i} = strcat(model_path,'/',txtModels{1,1}{i});
+end
+
+%Placeholder cells for initial table (ri), table after first 2 columns are
+%fixed (rm), and final table (rf) for inspection
+ri = cell(1,numfiles);
+rm = cell(1,numfiles);
+rf = cell(1,numfiles);
+
+
+for i = 1:numfiles
+    fprintf(allFiles{i});
+    
+    r = dread(allFiles{i}); %read the IMOD txt file into r
+    ri{i} = r; %put initial table of points into cell ri
+    columnNum = find(all(r == 0)); %creates an array of column numbers that contain all zeroes
+    r(:,columnNum) = [] %erase columns of all zero in r 
+    
+    indices = find(r(:)==0) %find index of each 0 element
+    [row, column] = find(r==0) %recored row and column number of each 0 element
+    
+    n = numel(indices);
+    
+    %Loop to fix all columns and delete all zeroes. Ends when there are no
+    %more zeros
+    while n >= 1
+        for j = 1:length(indices) %loop to create new table of r that fixes columns with current location of zeros
+            x = indices(j); 
+            a = row(j);
+            b = column(j);
+            if b+1 == max(column)+1
+                break
+            end
+            r(x) = r(a,b+1);
+            r(a,b+1) = 0;
+        end 
+    
+        %Find all new columns of zeros and erase them
+        sz = size(r);
+        if sz(1) == 1
+            columnNum = find(r==0);
+            r(:,columnNum) = [];
+        else
+            columnNum = find(all(r == 0)); %creates an array of column numbers that contain all zeroes
+            r(:,columnNum) = [] %erase columns of all zero in r 
+        end
+        
+        %Find new zero locations
+        indices = find(r(:)==0); %find index of each 0 element
+        [row, column] = find(r==0); %recored row and column number of each 0 element
+        n = numel(indices);
+    end
+
+    rf{i} = r; %places final table of model points into cell rf
+    
+    %Generate general model for each point, create crop point
+    m = dmodels.general();
+    m.addPoint(rf{i});
+    m.updateCrop();
+    
+    %This block of lines creates the model name with the proper extension
+    pre_name = strsplit(allFiles{i},'/');
+    m_name = erase(pre_name{1,end},'txt');
+    m_omd = char(strcat(m_name,'omd'));
+    
+    %Add the model to your volume in your project catalogue
+    dcm('-c',catal,'-i',volnum,'-am',m,'-modelname',m_omd)
+    
+    %create crop table for cropping points in model
+    t = m.grepTable();
+    t(1,20) = volnum;
+    allTables{i} = t;
+    volnum = volnum + 1;
+end
+
+tGlobal = dtmerge({allTables{:}},'linear_tags',1);
+
+%Merge all the tables of models in this tomogram and crop particles
+o = dtcrop('Rosette_tableMap.doc',tGlobal,pName,cropSize);
+    
